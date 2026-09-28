@@ -1,0 +1,17 @@
+{
+  "Title": "Fixed Memory Leaks",
+  "Description": "",
+  "ID": "lwteam.fixmemoryleaks",
+  "Version": "1.0.0",
+  "TargetGameVersion": "v1.9.06",
+  "Requirements": "",
+  "RequirementNames": "",
+  "Authors": "LW team",
+  "Visibility": "Unlisted",
+  "Tags": [
+    "Tools"
+  ],
+  "WorkshopID": 3809548602,
+  "UploadFilesOnly": true,
+  "UploadThumbnail": false
+}

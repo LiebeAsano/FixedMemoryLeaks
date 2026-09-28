@@ -1,0 +1,11 @@
+{
+  "id": "lwteam.fixmemoryleaks",
+  "name": "Fixed Memory Leaks",
+  "version": "1.0.0",
+  "authors": "LW team",
+  "description": "",
+  "requirements": [],
+  "tags": [
+    "Tools"
+  ]
+}
