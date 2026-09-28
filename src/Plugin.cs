@@ -14,6 +14,7 @@ public sealed class Plugin : BaseUnityPlugin
         ComboBoxUnassign.Hook();
         ThreadRelease.Hook();
         WarpContainerRelease.Hook();
+        PushToMeowRelease.Hook();
         Janitor.Hook();
     }
 }
