@@ -15,6 +15,7 @@ public sealed class Plugin : BaseUnityPlugin
         ThreadRelease.Hook();
         WarpContainerRelease.Hook();
         PushToMeowRelease.Hook();
+        OrphanedPreparers.Hook(Log.LogInfo);
         Janitor.Hook();
     }
 }

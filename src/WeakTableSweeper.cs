@@ -45,6 +45,7 @@ public static class WeakTableSweeper
 
     private const int MaxDepth = 6;
     private const int ArrayProbe = 16;
+    private const int ArrayScan = 1024;
     private const int VisitBudget = 50000;
 
     private const BindingFlags StaticFields = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
@@ -70,6 +71,13 @@ public static class WeakTableSweeper
     private static readonly HashSet<object> sharedValueTables = new(ReferenceComparer.Instance);
     private static readonly List<KeyValuePair<object, WeakReference>> releasedCutValues = [];
 
+    private static List<object> pruneTargets;
+    private static int pruneNext;
+    private static HashSet<object> goneBefore = new(ReferenceComparer.Instance);
+    private static HashSet<object> goneNow = new(ReferenceComparer.Instance);
+
+    public static int Pruned { get; set; }
+
     public static Result Sweep(object dead, Func<object, bool> barrier, Func<Type, bool> scopedKey, Func<object, bool> prune = null)
     {
         Stopwatch watch = Stopwatch.StartNew();
@@ -78,7 +86,7 @@ public static class WeakTableSweeper
         if (tableFields == null)
             Discover(scopedKey);
 
-        Reach reach = new(dead, barrier, prune);
+        Reach reach = new(dead, barrier, prune, scopedKey);
 
         foreach (object table in Tables())
         {
@@ -123,6 +131,72 @@ public static class WeakTableSweeper
 
         result.Milliseconds = watch.ElapsedMilliseconds;
         return result;
+    }
+
+    public static void Prune(Func<Type, bool> mortalKey, Func<object, bool> gone)
+    {
+        if (tableFields == null)
+            return;
+
+        if (pruneTargets == null || pruneNext >= pruneTargets.Count)
+        {
+            if (pruneTargets != null)
+            {
+                (goneBefore, goneNow) = (goneNow, goneBefore);
+                goneNow.Clear();
+            }
+            pruneTargets = PruneTargets(mortalKey);
+            pruneNext = 0;
+            if (pruneTargets.Count == 0)
+                return;
+        }
+
+        object target = pruneTargets[pruneNext++];
+        if (target is IDictionary dictionary)
+        {
+            List<object> doomed = [];
+            foreach (DictionaryEntry entry in dictionary)
+                if (Doomed(entry.Key))
+                    doomed.Add(entry.Key);
+            foreach (object key in doomed)
+                dictionary.Remove(key);
+            Pruned += doomed.Count;
+            return;
+        }
+
+        TableAccess access = Access(target.GetType());
+        foreach (KeyValuePair<object, object> entry in access.Entries(target))
+        {
+            if (!Doomed(entry.Key))
+                continue;
+            access.Remove.Invoke(target, [entry.Key]);
+            Pruned++;
+        }
+
+        bool Doomed(object key)
+        {
+            if (!gone(key))
+                return false;
+            if (goneBefore.Contains(key))
+                return true;
+            goneNow.Add(key);
+            return false;
+        }
+    }
+
+    private static List<object> PruneTargets(Func<Type, bool> mortalKey)
+    {
+        List<object> targets = [];
+
+        foreach (object table in Tables())
+            if (Access(table.GetType()) != null && mortalKey(table.GetType().GetGenericArguments()[0]))
+                targets.Add(table);
+
+        foreach (FieldInfo field in dictionaryFields)
+            if (mortalKey(field.FieldType.GetGenericArguments()[0]) && Read(field, null) is IDictionary dictionary)
+                targets.Add(dictionary);
+
+        return targets;
     }
 
     public static Detached Detach(Func<Type, bool> scopedKey)
@@ -386,7 +460,7 @@ public static class WeakTableSweeper
             }
         }
 
-        return tableFieldsOf[type] = found.ToArray();
+        return tableFieldsOf[type] = [.. found];
     }
 
     private static List<object> Tables()
@@ -499,13 +573,22 @@ public static class WeakTableSweeper
         }
     }
 
-    private sealed class Reach(object dead, Func<object, bool> barrier, Func<object, bool> prune)
+    private sealed class Reach(object dead, Func<object, bool> barrier, Func<object, bool> prune, Func<Type, bool> owned)
     {
         private readonly HashSet<object> leading = new(ReferenceComparer.Instance);
         private readonly Dictionary<object, int> dryWithin = new(ReferenceComparer.Instance);
+        private readonly Dictionary<Type, bool> ownedTypes = [];
 
         public bool Doomed(object key, object value) =>
-            ReferenceEquals(key, dead) || (!Closed(key) && (Leads(key) || Leads(value)));
+            ReferenceEquals(key, dead) || (Owned(key) && !Closed(key) && (Leads(key) || Leads(value)));
+
+        private bool Owned(object key)
+        {
+            Type type = key.GetType();
+            if (!ownedTypes.TryGetValue(type, out bool result))
+                ownedTypes[type] = result = owned(type);
+            return result;
+        }
 
         private bool Leads(object root)
         {
@@ -583,12 +666,14 @@ public static class WeakTableSweeper
                 yield break;
 
             int probed = 0;
+            int position = 0;
             foreach (object item in array)
             {
-                if (probed++ == ArrayProbe)
+                if (probed == ArrayProbe || position++ == ArrayScan)
                     yield break;
                 if (item == null)
                     continue;
+                probed++;
 
                 if (element.IsValueType)
                 {
@@ -651,7 +736,7 @@ public static class WeakTableSweeper
             }
         }
 
-        return referenceFields[type] = found.ToArray();
+        return referenceFields[type] = [.. found];
     }
 
     private static bool CarriesReferences(Type type)

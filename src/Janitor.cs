@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 
 namespace FixMemoryLeaks;
@@ -26,12 +27,26 @@ public static class Janitor
         On.ProcessManager.PreSwitchMainProcess += ProcessManager_PreSwitchMainProcess;
         On.AssetManager.HardCleanFutileAssets += AssetManager_HardCleanFutileAssets;
         On.RainWorldGame.ctor += RainWorldGame_ctor;
+        On.RainWorldGame.Update += RainWorldGame_Update;
+    }
+
+    private static void RainWorldGame_Update(On.RainWorldGame.orig_Update orig, RainWorldGame self)
+    {
+        orig(self);
+
+        try
+        {
+            WeakTableSweeper.Prune(MortalKey, Gone);
+        }
+        catch (Exception e)
+        {
+            Plugin.Log.LogError(e);
+        }
     }
 
     private static void ProcessManager_PreSwitchMainProcess(On.ProcessManager.orig_PreSwitchMainProcess orig, ProcessManager self, ProcessManager.ProcessID ID)
     {
-        MainLoopProcess previous = oldProcess.GetValue(self) as MainLoopProcess;
-        released = previous != null && previous != self.currentMainLoop && previous != self.pendingProcess ? previous : null;
+        released = oldProcess.GetValue(self) is MainLoopProcess previous && previous != self.currentMainLoop && previous != self.pendingProcess ? previous : null;
 
         switching = true;
         try
@@ -59,7 +74,7 @@ public static class Janitor
         WeakTableSweeper.Detached detached = null;
         try
         {
-            detached = WeakTableSweeper.Detach(GameScoped);
+            detached = WeakTableSweeper.Detach(OwnedKey);
         }
         catch (Exception e)
         {
@@ -101,8 +116,13 @@ public static class Janitor
 
         try
         {
-            WeakTableSweeper.Result result = WeakTableSweeper.Sweep(dead, Barrier, GameScoped, dead is RainWorldGame ? null : InGameWorld);
+            WeakTableSweeper.Result result = WeakTableSweeper.Sweep(dead, Barrier, OwnedKey, dead is RainWorldGame ? null : InGameWorld);
             Plugin.Log.LogInfo($"{dead.GetType().Name}: removed {result.Removed} of {result.Entries} entries in {result.Tables} tables, {result.Milliseconds} ms");
+            if (WeakTableSweeper.Pruned > 0)
+            {
+                Plugin.Log.LogInfo($"removed {WeakTableSweeper.Pruned} entries of destroyed objects during play");
+                WeakTableSweeper.Pruned = 0;
+            }
         }
         catch (Exception e)
         {
@@ -124,14 +144,53 @@ public static class Janitor
         return scoped;
     }
 
+    private static readonly HashSet<string> modWorldTypes =
+    [
+        "LetMeSetMyNeedlesDown.LetMeSetMyNeedlesDown+NeedleAndCord",
+        "RandomBuffUtils.ParticleSystem.ParticleEmitter"
+    ];
+
+    private static readonly Type[] gameScoped =
+    [
+        typeof(UpdatableAndDeletable), typeof(AbstractWorldEntity), typeof(Room), typeof(AbstractRoom), typeof(World),
+        typeof(RainWorldGame), typeof(RoomCamera), typeof(GraphicsModule), typeof(CreatureState)
+    ];
+
+    private static readonly Type[] owned =
+    [
+        .. gameScoped,
+        typeof(RoomCamera.SpriteLeaser), typeof(ArtificialIntelligence), typeof(AIModule), typeof(BodyPart), typeof(Room.Tile),
+        typeof(RoomSettings), typeof(Region), typeof(Region.RegionParams), typeof(PlacedObject), typeof(PlacedObject.Data),
+        typeof(WorldLoader), typeof(BodyChunk), typeof(Creature.Grasp), typeof(AbstractPhysicalObject.AbstractObjectStick),
+        typeof(AbstractCreatureAI), typeof(FlyAI), typeof(OracleBehavior), typeof(Conversation), typeof(Tentacle),
+        typeof(Player.SpearOnBack), typeof(KingTusks.Tusk), typeof(DaddyGraphics.HunterDummy),
+        typeof(MoreSlugcats.VultureMaskGraphics), typeof(MoreSlugcats.ConsoleVisualizer),
+        typeof(JollyCoop.JollyHUD.JollyPlayerSpecificHud.JollyPointer), typeof(Menu.Remix.MixedUI.UIelement),
+        typeof(Water), typeof(OverWorld), typeof(GlobalRain), typeof(RainCycle), typeof(GhostWorldPresence), typeof(GameSession),
+        typeof(HUD.HUD), typeof(HUD.HudPart), typeof(HUD.FoodMeter.MeterCircle),
+        typeof(Menu.MenuObject), typeof(DevInterface.DevUI), typeof(DevInterface.DevUINode)
+    ];
+
+    private static readonly Type[] mortal =
+    [
+        typeof(UpdatableAndDeletable), typeof(AbstractWorldEntity), typeof(RoomCamera.SpriteLeaser), typeof(BodyChunk)
+    ];
+
+    private static bool OwnedKey(Type type) =>
+        owned.Any(scope => scope.IsAssignableFrom(type)) || modWorldTypes.Contains(type.FullName);
+
     private static bool GameScoped(Type type) =>
-        typeof(UpdatableAndDeletable).IsAssignableFrom(type)
-        || typeof(AbstractWorldEntity).IsAssignableFrom(type)
-        || typeof(Room).IsAssignableFrom(type)
-        || typeof(AbstractRoom).IsAssignableFrom(type)
-        || typeof(World).IsAssignableFrom(type)
-        || typeof(RainWorldGame).IsAssignableFrom(type)
-        || typeof(RoomCamera).IsAssignableFrom(type)
-        || typeof(GraphicsModule).IsAssignableFrom(type)
-        || typeof(CreatureState).IsAssignableFrom(type);
+        gameScoped.Any(scope => scope.IsAssignableFrom(type));
+
+    private static bool MortalKey(Type key) =>
+        mortal.Any(kind => kind.IsAssignableFrom(key) || key.IsAssignableFrom(kind));
+
+    private static bool Gone(object key) => key switch
+    {
+        UpdatableAndDeletable obj => obj.slatedForDeletetion,
+        AbstractWorldEntity entity => entity.slatedForDeletion,
+        RoomCamera.SpriteLeaser leaser => leaser.deleteMeNextFrame,
+        BodyChunk chunk => chunk.owner is { slatedForDeletetion: true },
+        _ => false
+    };
 }
