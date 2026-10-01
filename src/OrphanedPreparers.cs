@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Threading;
 
 namespace FixMemoryLeaks;
 
@@ -21,10 +22,12 @@ public static class OrphanedPreparers
     private static readonly List<RoomPreparer> gone = [];
     private static int frame;
     private static Action<string> log;
+    private static Thread mainThread;
 
     public static void Hook(Action<string> logger)
     {
         log = logger;
+        mainThread = Thread.CurrentThread;
         On.RoomPreparer.Update += RoomPreparer_Update;
         On.RainWorldGame.ShutDownProcess += RainWorldGame_ShutDownProcess;
         On.OverWorld.WorldLoaded += OverWorld_WorldLoaded;
@@ -35,7 +38,7 @@ public static class OrphanedPreparers
     {
         orig(self);
 
-        if (!Stopped(self))
+        if (Thread.CurrentThread == mainThread && !Stopped(self))
             running[self] = frame;
     }
 
